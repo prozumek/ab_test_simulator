@@ -6,43 +6,44 @@ import matplotlib.pyplot as plt
 # Set random seed for reproducibility
 np.random.seed(42)
 
-st.title("🧩 A/B Test Segment Simulator")
+st.title("🧩 A/B Test Segment Simulator — Fixed Version")
 
 st.markdown("""
 This sandbox lets you explore the impact of segmentation precision and uplift assumptions
 for both Age-based (Gen Z) and Behavioural segments.
+
 """)
 
 # --- INPUTS ---
 st.sidebar.header("Simulation Settings")
 
 # Toggle behavioural curves
-show_behavioural = st.sidebar.checkbox("Show Behavioural Segments", value=False)
+show_behavioural = st.sidebar.checkbox("Show Behavioural Segments", value=True)
 
 # Population splits
 gen_z_base_rate = st.sidebar.slider("% of Gen Z in population", 0, 100, 50) / 100
 casual_base_rate = st.sidebar.slider("% of Casuals in population", 0, 100, 70) / 100
 
-
 # Uplifts: Gen Z
 st.sidebar.markdown('<span style="color:blue">**Gen Z Uplifts**</span>', unsafe_allow_html=True)
 gen_z_control = st.sidebar.number_input("Gen Z Control Conversion Rate (%)", value=10.0) / 100
-gen_z_treatment = st.sidebar.number_input("Gen Z Treatment Conversion Rate (%)", value=18.0) / 100
+gen_z_treatment = st.sidebar.number_input("Gen Z Treatment Conversion Rate (%)", value=16.0) / 100
+
 st.sidebar.markdown('<span style="color:orange">**Non-Gen Z Uplifts**</span>', unsafe_allow_html=True)
 non_gen_z_control = st.sidebar.number_input("Non-Gen Z Control Conversion Rate (%)", value=10.0) / 100
-non_gen_z_treatment = st.sidebar.number_input("Non-Gen Z Treatment Conversion Rate (%)", value=4.0) / 100
+non_gen_z_treatment = st.sidebar.number_input("Non-Gen Z Treatment Conversion Rate (%)", value=5.0) / 100
 
 # Uplifts: Behavioural
 st.sidebar.markdown('<span style="color:green">**Behavioural Uplifts (Casual Users)**</span>', unsafe_allow_html=True)
 casual_control = st.sidebar.number_input("Casuals Control Conversion Rate (%)", value=10.0) / 100
 casual_treatment = st.sidebar.number_input("Casuals Treatment Conversion Rate (%)", value=12.0) / 100
+
 st.sidebar.markdown('<span style="color:red">**Heavies Uplifts**</span>', unsafe_allow_html=True)
 heavy_control = st.sidebar.number_input("Heavies Control Conversion Rate (%)", value=10.0) / 100
 heavy_treatment = st.sidebar.number_input("Heavies Treatment Conversion Rate (%)", value=7.0) / 100
 
 # Fixed settings
 population_size = 100_000
-segment_size = int(0.5 * population_size)
 
 # --- SIMULATION ---
 users = pd.DataFrame({
@@ -52,20 +53,22 @@ users = pd.DataFrame({
     'group': np.random.choice(['control', 'treatment'], size=population_size)
 })
 
-# Assign conversion probabilities based on chosen label
-def assign_conversion(row, label):
-    if label == 'true_gen_z':
-        if row[label]:
-            return gen_z_control if row['group'] == 'control' else gen_z_treatment
-        else:
-            return non_gen_z_control if row['group'] == 'control' else non_gen_z_treatment
-    elif label == 'true_casual':
-        if row[label]:
-            return casual_control if row['group'] == 'control' else casual_treatment
-        else:
-            return heavy_control if row['group'] == 'control' else heavy_treatment
-    else:
-        return 0.0
+# Precompute conversion probabilities
+users['conversion_prob_gen_z'] = np.where(
+    users['true_gen_z'] == 1,
+    np.where(users['group'] == 'control', gen_z_control, gen_z_treatment),
+    np.where(users['group'] == 'control', non_gen_z_control, non_gen_z_treatment)
+)
+
+users['conversion_prob_behaviour'] = np.where(
+    users['true_casual'] == 1,
+    np.where(users['group'] == 'control', casual_control, casual_treatment),
+    np.where(users['group'] == 'control', heavy_control, heavy_treatment)
+)
+
+# Precompute conversions
+users['converted_gen_z'] = np.random.binomial(1, users['conversion_prob_gen_z'])
+users['converted_behaviour'] = np.random.binomial(1, users['conversion_prob_behaviour'])
 
 # Segment simulation
 def apply_precision_segment(users, precision, segment_size, label):
@@ -91,7 +94,7 @@ def apply_precision_segment(users, precision, segment_size, label):
     return segment
 
 # Metrics function
-def calculate_metrics(data, segment_column, precision):
+def calculate_metrics(data, segment_column, precision, converted_column):
     results = []
     for segment_value in [1, 0]:
         segment_data = data[data[segment_column] == segment_value]
@@ -101,8 +104,8 @@ def calculate_metrics(data, segment_column, precision):
         control = segment_data[segment_data['group'] == 'control']
         treatment = segment_data[segment_data['group'] == 'treatment']
 
-        conv_control = control['converted'].mean() if len(control) > 0 else 0
-        conv_treatment = treatment['converted'].mean() if len(treatment) > 0 else 0
+        conv_control = control[converted_column].mean() if len(control) > 0 else 0
+        conv_treatment = treatment[converted_column].mean() if len(treatment) > 0 else 0
 
         lift = (conv_treatment / conv_control - 1) if conv_control > 0 else np.nan
 
@@ -116,14 +119,12 @@ def calculate_metrics(data, segment_column, precision):
     return results
 
 # Collect results
-def simulate_segment(label, precision_values):
+def simulate_segment(label, precision_values, converted_column, base_rate):
     results = []
-    users['conversion_prob'] = users.apply(lambda row: assign_conversion(row, label), axis=1)
-    users['converted'] = np.random.binomial(1, users['conversion_prob'])
-
+    segment_size = int(population_size * base_rate)
     for precision in precision_values:
         users['predicted_segment'] = apply_precision_segment(users, precision, segment_size, label)
-        metrics = calculate_metrics(users, 'predicted_segment', precision)
+        metrics = calculate_metrics(users, 'predicted_segment', precision, converted_column)
 
         for metric in metrics:
             metric['Strategy'] = 'Age-based Gen Z' if label == 'true_gen_z' else 'Behavioural'
@@ -141,8 +142,8 @@ gen_z_precisions = np.linspace(0.1, 1.0, 10)
 behaviour_precisions = np.linspace(0.1, 1.0, 10)
 
 # Run simulations
-gen_z_results = simulate_segment('true_gen_z', gen_z_precisions)
-behaviour_results = simulate_segment('true_casual', behaviour_precisions)
+gen_z_results = simulate_segment('true_gen_z', gen_z_precisions, 'converted_gen_z', gen_z_base_rate)
+behaviour_results = simulate_segment('true_casual', behaviour_precisions, 'converted_behaviour', casual_base_rate)
 
 final_results = pd.concat([gen_z_results, behaviour_results], ignore_index=True)
 
@@ -151,14 +152,7 @@ final_results_display = final_results.copy()
 for col in ['Control Conversion', 'Treatment Conversion', 'Lift']:
     final_results_display[col] = (final_results_display[col] * 100).round(1).astype(str) + '%'
 
-# Show table
-st.subheader("📊 Simulation Results Table")
-st.dataframe(final_results_display)
-
-# Optional export
-st.download_button("💾 Download Results as CSV", final_results.to_csv(index=False).encode('utf-8'), "simulation_results.csv", "text/csv")
-
-# Plot
+# --- PLOT FIRST ---
 st.subheader("📈 Segment Precision vs. Observed Lift")
 fig, ax = plt.subplots(figsize=(10, 6))
 
@@ -184,6 +178,13 @@ ax.set_title('Effect of Segment Precision on Observed Lift')
 ax.legend()
 
 st.pyplot(fig)
+
+# --- THEN TABLE ---
+st.subheader("📊 Simulation Results Table")
+st.dataframe(final_results_display)
+
+# Optional export
+st.download_button("💾 Download Results as CSV", final_results.to_csv(index=False).encode('utf-8'), "simulation_results.csv", "text/csv")
 
 st.markdown("""
 ---
